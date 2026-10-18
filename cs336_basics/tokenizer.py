@@ -1,40 +1,25 @@
 import regex as re
 import copy
 from typing import BinaryIO
-
+import time 
+from .pretokenization_example import find_chunk_boundaries
+import multiprocessing
+from functools import partial
+from collections import Counter
 def BPE_tokenizer(
     file_path: str,
     vocab_size: int,
     special_tokens: list[str]
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]: 
     "vocab, merges"
-    
+    pre_tokenization_start = time.perf_counter()
     for i in special_tokens:
         assert isinstance(i, str), "Must represent special token as a str"
-    sorted_special_tokens = sorted(special_tokens, key=len, reverse = True)
     next_token_id = 256
-    pattern = "|".join(re.escape(token) for token in sorted_special_tokens)
-    with open(file_path, "rb") as file:
-        text = file.read().decode("utf-8")
-    if len(special_tokens) != 0:
-        parts = re.split(pattern, text)
-    else:
-        parts = [text]
-    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-    tokens: dict[tuple[bytes, ...], int] = {}
     token_list = []
-    for part in parts:
-        words = re.finditer(PAT, part)
-        for word in words:
-            word = word.group().encode("utf-8")
-            word_len = len(word)
-            key: tuple[bytes, ...] = ()
-            for i in range(0, word_len):
-                key = key + (word[i:i+1],)
-            if key in tokens:
-                tokens[key] += 1 
-            else:
-                tokens[key] =1 
+    tokens = pre_tokenizer(file_path, special_tokens)
+    start = time.perf_counter()
+    print(f"pre-tokenization took {start - pre_tokenization_start} time")
     # pre-tokenization complete here, the tokens dict contains all the tokens with their counts. 
     # next step is to create pairs and start merging. 
     for token, count in tokens.items():
@@ -43,7 +28,7 @@ def BPE_tokenizer(
     vocab = {}
     for i in range(256):
         vocab[i] = bytes([i])
-    for i in sorted_special_tokens:
+    for i in special_tokens:
         vocab[next_token_id] = i.encode("utf-8")
         next_token_id+=1
     merges = []
@@ -100,21 +85,49 @@ def BPE_tokenizer(
             for i in id_add:
                 pairs_dict.setdefault(i, set()).add(j)
             token_list[j] = (tuple(new_token), count)
+    end = time.perf_counter()
+    print(f"merging took {end-start} time")
     return (vocab, merges)
 
         
+def pre_tokenization(file_path: str, special_tokens: list[str], chunk_boundary: tuple[int, int]) -> dict[tuple[bytes, ...], int]:
+    with open(file_path, "rb") as file:
+        file.seek(chunk_boundary[0])
+        text = file.read(chunk_boundary[1]-chunk_boundary[0]).decode("utf-8")
+    sorted_special_tokens = sorted(special_tokens, key=len, reverse = True)
+    pattern = "|".join(re.escape(token) for token in sorted_special_tokens)
+    if len(special_tokens) != 0:
+        parts = re.split(pattern, text)
+    else:
+        parts = [text]
+    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+    tokens: dict[tuple[bytes, ...], int] = {}
+    for part in parts:
+        words = re.finditer(PAT, part)
+        for word in words:
+            word = word.group().encode("utf-8")
+            word_len = len(word)
+            key: tuple[bytes, ...] = ()
+            for i in range(0, word_len):
+                key = key + (word[i:i+1],)
+            if key in tokens:
+                tokens[key] += 1 
+            else:
+                tokens[key] =1 
+    return tokens
 
-
-        
-            
-
-
-
-        
-
-        
-
-            
+def pre_tokenizer(file_path: str, special_token: list[str]) -> dict[tuple[bytes, ...], int]:
+    num_chunks = 24
+    with open(file_path, "rb") as file:
+        boundaries = find_chunk_boundaries(file, num_chunks, b"<|endoftext|>")
+        chunks = list(zip(boundaries[:-1], boundaries[1:]))
+    workers = partial(pre_tokenization, file_path, special_token)
+    tokens = Counter()
+    with multiprocessing.Pool(processes=8) as pool:
+        for result in pool.imap_unordered(workers, chunks):
+            tokens.update(result)
+    return dict(tokens)
+    
 
 if __name__ == "__main__":
     BPE_tokenizer("scratch/toy.txt", 270, ["<|endoftext|>"])
