@@ -1,137 +1,107 @@
 import regex as re
-import copy
-from typing import BinaryIO
-import time 
-from .pretokenization_example import find_chunk_boundaries
-import multiprocessing
-from functools import partial
-from collections import Counter
-def BPE_tokenizer(
-    file_path: str,
-    vocab_size: int,
-    special_tokens: list[str]
-) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]: 
-    "vocab, merges"
-    pre_tokenization_start = time.perf_counter()
-    for i in special_tokens:
-        assert isinstance(i, str), "Must represent special token as a str"
-    next_token_id = 256
-    token_list = []
-    tokens = pre_tokenizer(file_path, special_tokens)
-    start = time.perf_counter()
-    print(f"pre-tokenization took {start - pre_tokenization_start} time")
-    # pre-tokenization complete here, the tokens dict contains all the tokens with their counts. 
-    # next step is to create pairs and start merging. 
-    for token, count in tokens.items():
-        token_list.append((token, count))
-    num_loops = vocab_size - 256 - len(special_tokens)
-    vocab = {}
-    for i in range(256):
-        vocab[i] = bytes([i])
-    for i in special_tokens:
-        vocab[next_token_id] = i.encode("utf-8")
-        next_token_id+=1
-    merges = []
-    pairs_dict: dict[tuple[bytes, bytes], set[int]] = {} # (bytes, bytes) -> [int]
-    pairs_count: dict[tuple[bytes, bytes], int] = {}
-    for i in range(len(token_list)):
-        (token, count)= token_list[i]
-        for j in range(len(token)-1):
-            pair = (token[j], token[j+1])
-            existing_set = pairs_dict.get(pair, None)
-            if existing_set is not None:
-                existing_set.add(i)
-                pairs_count[pair] += count
-            else:
-                pairs_dict[pair] = {i}
-                pairs_count[pair] = count
+import pickle 
+import typing
+from typing import (Iterable, Iterator)
+class Tokenizer:
+    def __init__(self, vocab: dict[int, bytes], merges: list[tuple[bytes, bytes]], special_tokens: list[str] | None = None):
+        self.vocab = vocab
+        self.merges = merges
+        if special_tokens is None:
+            special_tokens = []
+        if special_tokens != []:
+            values = set(vocab.values())
+            next_token_id = len(vocab)
+            for i in special_tokens:
+                if i.encode("utf-8") not in values: 
+                    vocab[next_token_id] = i.encode("utf-8")
+                    values.add(i.encode("utf-8"))
+                    next_token_id+=1
+        mapping = {}
+        for (key, value) in vocab.items():
+            mapping[value] = key
+        self.rev_index = mapping
+        pos_mapping = {}
+        for i in range(len(merges)):
+            pos_mapping[merges[i]] = i
+        self.positions = pos_mapping
+        if special_tokens != []:
+            sorted_special_tokens = sorted(special_tokens, key=len, reverse = True)
+            pattern = re.compile("(" + "|".join(re.escape(token) for token in sorted_special_tokens) + ")")
+            self.split_pattern = pattern
+            self.specials = set(special_tokens)
+        else:
+            self.split_pattern = None
+            self.specials = set()
+        PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+        self.pretoken_pattern = re.compile(PAT)
 
-    for i in range(num_loops):
-        if len(pairs_count) == 0:
-            break
-        max_pair = max(pairs_count, key=lambda k: (pairs_count[k], k))
-        vocab[next_token_id] = max_pair[0] + max_pair[1]
-        next_token_id+=1
-        merges.append(max_pair)
-        tokens_index = copy.deepcopy(pairs_dict[max_pair])
-        for j in tokens_index:
-            token = token_list[j][0]
-            count = token_list[j][1]
-            new_token = []
-            k = 0
-            while k<len(token):
-                if k!= len(token)-1 and (token[k] == max_pair[0] and token[k+1] == max_pair[1]):
-                    new_token.append(token[k] + token[k+1])
-                    k += 2
-                else:
-                    new_token.append(token[k])
-                    k += 1
-            old_pairs = []
-            new_pairs = []
-            for t in range(len(token)-1):
-                old_pairs.append((token[t], token[t+1]))
-            for x in range(len(new_token)-1):
-                new_pairs.append((new_token[x], new_token[x+1]))
-            for i in old_pairs:
-                pairs_count[i] -= count
-                if pairs_count[i] == 0:
-                    pairs_count.pop(i)
-            for i in new_pairs:
-                pairs_count[i] = pairs_count.get(i, 0) + count
-            id_remove = set(old_pairs) - set(new_pairs)
-            id_add = set(new_pairs) - set(old_pairs)
-            for i in id_remove:
-                pairs_dict[i].remove(j)
-            for i in id_add:
-                pairs_dict.setdefault(i, set()).add(j)
-            token_list[j] = (tuple(new_token), count)
-    end = time.perf_counter()
-    print(f"merging took {end-start} time")
-    return (vocab, merges)
+    @classmethod
+    def from_files(cls, vocab_filepath, merges_filepath, special_tokens = None) -> typing.Self:
+        with open(vocab_filepath, "rb") as f:
+            vocab = pickle.load(f)
+        with open(merges_filepath, "rb") as f:
+            merges = pickle.load(f)
+        return cls(vocab, merges, special_tokens)
 
-        
-def pre_tokenization(file_path: str, special_tokens: list[str], chunk_boundary: tuple[int, int]) -> dict[tuple[bytes, ...], int]:
-    with open(file_path, "rb") as file:
-        file.seek(chunk_boundary[0])
-        text = file.read(chunk_boundary[1]-chunk_boundary[0]).decode("utf-8")
-    sorted_special_tokens = sorted(special_tokens, key=len, reverse = True)
-    pattern = "|".join(re.escape(token) for token in sorted_special_tokens)
-    if len(special_tokens) != 0:
-        parts = re.split(pattern, text)
-    else:
-        parts = [text]
-    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-    tokens: dict[tuple[bytes, ...], int] = {}
-    for part in parts:
-        words = re.finditer(PAT, part)
-        for word in words:
-            word = word.group().encode("utf-8")
-            word_len = len(word)
-            key: tuple[bytes, ...] = ()
-            for i in range(0, word_len):
-                key = key + (word[i:i+1],)
-            if key in tokens:
-                tokens[key] += 1 
-            else:
-                tokens[key] =1 
-    return tokens
+    def decode(self, ids: list[int])->str:
+        text = []
+        for i in ids:
+            text.append(self.vocab[i])
+        return b"".join(text).decode("utf-8",errors="replace")
 
-def pre_tokenizer(file_path: str, special_token: list[str]) -> dict[tuple[bytes, ...], int]:
-    num_chunks = 24
-    with open(file_path, "rb") as file:
-        boundaries = find_chunk_boundaries(file, num_chunks, b"<|endoftext|>")
-        chunks = list(zip(boundaries[:-1], boundaries[1:]))
-    workers = partial(pre_tokenization, file_path, special_token)
-    tokens = Counter()
-    with multiprocessing.Pool(processes=8) as pool:
-        for result in pool.imap_unordered(workers, chunks):
-            tokens.update(result)
-    return dict(tokens)
-    
+    def encode(self, text: str)-> list[int]:
+        if self.split_pattern is not None:
+            parts = re.split(self.split_pattern, text)
+        else:
+            parts = [text]
+        encoded_tokens = []
+        for part in parts:
+            if part in self.specials:
+                encoded_tokens.append(self.rev_index[part.encode("utf-8")])
+                continue
+            words = re.finditer(self.pretoken_pattern, part)
+            for word in words:
+                word = word.group()
+                tokens = [
+                    bytes([b])
+                    for b in word.encode("utf-8")
+                ]
+                while len(tokens) > 1:
+                    lowest_rank = float("inf")
+                    best_index = None
+                    for i in range(len(tokens)-1):
+                        pair = (tokens[i], tokens[i+1])
+                        if (pair) in self.positions:
+                            if self.positions[pair] < lowest_rank:
+                                lowest_rank = self.positions[pair]
+                                best_index = i 
+                    if best_index is None:
+                        break
+                    tokens[best_index:best_index+2] = [tokens[best_index] + tokens[best_index+1]]
+                ids = [
+                    self.rev_index[x] for x in tokens
+                ]
+                encoded_tokens.extend(ids)
+        return encoded_tokens
 
-if __name__ == "__main__":
-    BPE_tokenizer("scratch/toy.txt", 270, ["<|endoftext|>"])
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        buffer = ""
+        for chunk in iterable:
+            buffer += chunk
+            if self.split_pattern is None:
+                continue
+            last_end = 0
+            for match in self.split_pattern.finditer(buffer):
+                yield from self.encode(buffer[last_end:match.end()])
+                last_end = match.end()
+            buffer = buffer[last_end:]
+        if buffer:
+            yield from self.encode(buffer)
 
 
 
+                        
+if __name__=="__main__":
+    tokenizer = Tokenizer.from_files("/home/yash/assignment1-basics/outputs/trained_vocab.pkl", "/home/yash/assignment1-basics/outputs/trained_merges.pkl", ["<|endoftext|>"])
+    print(tokenizer.decode([240, 159, 153, 130]))
 

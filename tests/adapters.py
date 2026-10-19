@@ -4,6 +4,7 @@ import os
 from collections.abc import Iterable
 from typing import IO, Any, BinaryIO
 from cs336_basics import BPE_tokenizer 
+from cs336_basics import Tokenizer
 import numpy.typing as npt
 import torch
 from jaxtyping import Bool, Float, Int
@@ -559,7 +560,7 @@ def get_tokenizer(
     Returns:
         A BPE tokenizer that uses the provided vocab, merges, and special tokens.
     """
-    raise NotImplementedError
+    return Tokenizer(vocab, merges, special_tokens)
 
 
 def run_train_bpe(
